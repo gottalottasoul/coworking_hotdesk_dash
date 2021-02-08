@@ -1,0 +1,140 @@
+---
+title: "hana Share data exploration "
+resource_files:
+- inc/Share_data.RData
+runtime: shiny
+output:
+  flexdashboard::flex_dashboard:
+    theme: readable
+---
+
+```{r setup, include=FALSE}
+library(shiny)
+library(flexdashboard)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(stringr)
+library(ggplot2)
+library(plotly)
+library(scales)
+library(here)
+library(rlang)
+library(RColorBrewer)  
+library(DT)
+library(lubridate)
+library(RiHana)
+
+yesterdays_date<-Sys.Date()-1
+start_date<-lubridate::ceiling_date(yesterdays_date-180, unit="week",week_start = 1)
+past_30_days<-yesterdays_date-30
+past_7_days<-yesterdays_date-7
+month_to_date<-lubridate::floor_date(yesterdays_date, unit="month")
+
+load('inc/Share_data.RData')
+
+
+
+```
+
+```{r}
+
+updatedMeetData <- reactive({
+  share_data <-share_members_edited %>% 
+    filter(meeting_date>=input$ShareTimeRange[1],
+           meeting_date<=input$ShareTimeRange[2],
+           grepl(input$hanaLocation,hana_location,ignore.case = TRUE)) 
+
+  return(share_data)
+})
+
+
+
+
+```
+
+Sidebar {.sidebar}
+=====================================
+###### **Data Updated:** _`r yesterdays_date` ._
+
+```{r}
+
+sliderInput("ShareChurnRate",label="Monthly Churn",min=0,max=100,value=5)
+
+numericInput("ShareCaC", label="Share CAC", 1300, min = 800, max = 2000, step = 50)
+
+numericInput("SharePrice", label="Share Monthly Price", 300, min = 100, max = 1000, step = 10)
+
+
+```
+
+
+Meet {data-orientation=rows}
+===================================== 
+
+
+Row{ width=8}
+-------------------------------------
+### Yearly Churn
+
+```{r}
+my_colors<-hana_color_palette(3)
+
+renderValueBox({
+  ChurnSummary<-updatedMemberChurn()
+valueBox(prettyNum(meetSummary$meetings,big.mark = ","), 
+         icon = "fa-calendar-o",
+         color = "#E6E2DA")
+})
+```
+
+### Average Member Tenure
+
+```{r}
+my_colors<-hana_color_palette(3)
+renderValueBox({
+  TenureSummary<-updatedMemberChurn()
+valueBox(prettyNum(meetSummary$avgPrice,big.mark = ","), 
+         icon = "fa-file-invoice-dollar",
+         color = "#E6E2DA")
+})
+
+```
+
+### Average ROI
+
+```{r}
+my_colors<-hana_color_palette(3)
+renderValueBox({
+  ROISummary<-updatedROI()
+valueBox(prettyNum(meetSummary$avgProfit,big.mark = ","), 
+         icon = "fa-file-invoice-dollar",
+         color = "#E6E2DA")
+})
+```
+
+
+
+
+
+### Meet Resource Usage
+
+```{r }
+
+renderPlotly({
+  meet_data_detail<-updatedMeetData() %>%
+    group_by(resource_type) %>%
+    summarise(bookings=n()) %>%
+    arrange(bookings) %>%
+    mutate(resource_type=forcats::as_factor(as.character(resource_type))) %>%
+    plot_ly(marker = list(color = "#002D36"),
+          orientation='h',
+          y = ~resource_type,
+          x = ~bookings,
+          bargroupgap=0.1,
+          bargap = 0.15,
+          type="bar")
+})
+
+```
+

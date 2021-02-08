@@ -1,0 +1,568 @@
+---
+title: "hana Share data exploration "
+resource_files:
+- inc/Share_data.RData
+runtime: shiny
+output:
+  flexdashboard::flex_dashboard:
+    theme: readable
+    logo: inc/hana_logo_small.png
+    css: inc/corp-styles.css
+    includes:
+      before_body: 'inc/google-analytics.js'
+---
+
+```{r setup, include=FALSE}
+library(shiny)
+library(flexdashboard)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(stringr)
+library(ggplot2)
+library(plotly)
+library(scales)
+library(here)
+library(rlang)
+library(RColorBrewer)  
+library(DT)
+library(lubridate)
+library(RiHana)
+
+load('inc/Share_data.RData')
+
+
+
+
+```
+
+```{r}
+
+updatedShareDataSummary <- reactive({
+  share_data <-share_members_edited %>% 
+    filter(earliest_start>=input$ShareTimeRange[1],
+           earliest_start<=input$ShareTimeRange[2],
+           grepl(input$FreePromoIntro,promo,ignore.case = TRUE),
+           grepl(paste0(input$shareChannel,collapse="|"),acquisition_channel),
+           grepl(paste0(input$hanaLocation,collapse="|"),hana_location)) %>% 
+    summarise(total_members=n(),
+              active_members=sum(still_active=='Yes'),
+              rev_member=scales::dollar(sum(total_paid)/total_members))
+
+  return(share_data)
+})
+
+updatedShareMonthlyChurn<- reactive({
+
+  n_days <- interval(RiHana::get_relevant_date()$yoy_date,today())/days(1)
+  cohort_dates<- tibble::enframe(RiHana::get_relevant_date()$yoy_date + days(0:n_days)) %>% 
+  mutate(cohort_month=floor_date(value,unit="month"),
+         end_month=ceiling_date(value,unit="month")-1) %>% 
+  #group_by(cohort_month) %>% 
+  select(cohort_month,end_month) %>% 
+  unique(.) %>% 
+  mutate(end_month=as_date(ifelse(end_month>RiHana::get_relevant_date()$yesterdays_date,RiHana::get_relevant_date()$yesterdays_date,end_month)))
+
+  
+  share_cohort_members<-share_members_edited %>% 
+      filter(earliest_start>=input$ShareTimeRange[1],
+           earliest_start<=input$ShareTimeRange[2],
+           grepl(input$FreePromoIntro,promo,ignore.case = TRUE),
+           grepl(paste0(input$shareChannel,collapse="|"),acquisition_channel),
+           grepl(paste0(input$hanaLocation,collapse="|"),hana_location)) %>% 
+    mutate(last_member_date=coalesce(latest_cancel,today()),
+         join_cohort=floor_date(earliest_start,unit='month')) %>% 
+    select(coworkerid,join_cohort,last_member_date)
+
+monthly_churn<-cohort_dates %>% 
+  fuzzyjoin::fuzzy_inner_join(.,share_cohort_members,by=c("cohort_month"="join_cohort","end_month"="last_member_date"),match_fun=list(`>=`,`<=`)) %>% 
+  group_by(join_cohort,cohort_month) %>% 
+  summarise(members=n()) %>% 
+  mutate(period=row_number()) %>% 
+  select(-cohort_month) %>% 
+  group_by(join_cohort) %>% 
+  mutate(prev_members=lag(members)) %>% 
+  drop_na() %>% 
+  ungroup(.) %>% 
+  summarise(monthly_churn=scales::percent(1-(sum(members)/sum(prev_members))))
+
+monthly_churn
+
+})
+
+updatedShareData <- reactive({
+  share_data <-share_members_edited %>% 
+    filter(earliest_start>=input$ShareTimeRange[1],
+           earliest_start<=input$ShareTimeRange[2],
+           grepl(input$FreePromoIntro,promo,ignore.case = TRUE),
+           grepl(paste0(input$shareChannel,collapse="|"),acquisition_channel),
+           grepl(paste0(input$hanaLocation,collapse="|"),hana_location)) 
+
+  return(share_data)
+})
+
+updatedShareSurvival<- reactive({
+  
+#n_days <- interval(input$ShareTimeRange[1],today())/days(1)
+n_days <- interval(RiHana::get_relevant_date()$yoy_date,today())/days(1)
+cohort_dates<- tibble::enframe(RiHana::get_relevant_date()$yoy_date + days(0:n_days)) %>% 
+  mutate(cohort_month=floor_date(value,unit="month"),
+         end_month=ceiling_date(value,unit="month")-1) %>% 
+  #group_by(cohort_month) %>% 
+  select(cohort_month,end_month) %>% 
+  unique(.) %>% 
+  mutate(end_month=as_date(ifelse(end_month>RiHana::get_relevant_date()$yesterdays_date,RiHana::get_relevant_date()$yesterdays_date,end_month)))
+
+#  group_by(cohort_month) %>% 
+#  summarise(days=n())  
+
+  
+  
+  share_cohort_members<-share_members_edited %>% 
+      filter(earliest_start>=input$ShareTimeRange[1],
+           earliest_start<=input$ShareTimeRange[2],
+           grepl(input$FreePromoIntro,promo,ignore.case = TRUE),
+           grepl(paste0(input$shareChannel,collapse="|"),acquisition_channel),
+           grepl(paste0(input$hanaLocation,collapse="|"),hana_location)) %>% 
+    mutate(last_member_date=coalesce(latest_cancel,today()),
+           join_cohort=floor_date(earliest_start,unit='month')) %>% 
+    select(coworkerid,join_cohort,last_member_date)
+
+  share_cohorts<-cohort_dates %>% 
+  fuzzyjoin::fuzzy_inner_join(.,share_cohort_members,by=c("cohort_month"="join_cohort","end_month"="last_member_date"),match_fun=list(`>=`,`<=`)) %>% 
+  group_by(join_cohort,cohort_month) %>% 
+  summarise(members=n()) %>% 
+  mutate(period=row_number()) %>% 
+  select(-cohort_month) %>% 
+  ungroup(.) %>% 
+  rbind(share_cohort_members %>% group_by(join_cohort) %>% summarise(members=n()) %>% mutate(period=0) %>% ungroup(.)) %>% 
+  arrange(period) %>% 
+#  pivot_wider(names_from=period,values_from = members,values_fill = list(members=0))
+  pivot_wider(names_from=period,values_from = members)
+
+  return(share_cohorts)  
+
+
+})
+
+updatedSwipeData <- reactive({
+  swipe_data <-member_swipe_days %>% 
+    filter(earliest_start>=input$ShareTimeRange[1],
+           earliest_start<=input$ShareTimeRange[2],
+           grepl(input$FreePromoIntro,promo,ignore.case = TRUE),
+           grepl(paste0(input$shareChannel,collapse="|"),acquisition_channel),
+           grepl(paste0(input$hanaLocation,collapse="|"),hana_location)) %>% 
+    group_by(coworkerid) %>% 
+    summarise(days=n()) %>% 
+    group_by(days) %>% 
+    summarise(members=n())
+
+  return(swipe_data)
+})
+
+updatedSwipeDataDay <- reactive({
+  swipe_data <-member_swipe_days %>% 
+    filter(earliest_start>=input$ShareTimeRange[1],
+           earliest_start<=input$ShareTimeRange[2],
+           grepl(input$FreePromoIntro,promo,ignore.case = TRUE),
+           grepl(paste0(input$shareChannel,collapse="|"),acquisition_channel),
+           grepl(paste0(input$hanaLocation,collapse="|"),hana_location)) %>% 
+    mutate(total_occurences=n()) %>% 
+    group_by(swipe_day) %>% 
+    summarise(occurences=n()/max(total_occurences))
+
+  return(swipe_data)
+})
+
+updatedFirstSharePlans <- reactive({
+  share_data <-share_members_edited %>% 
+    filter(earliest_start>=input$ShareTimeRange[1],
+           earliest_start<=input$ShareTimeRange[2],
+           grepl(input$FreePromoIntro,promo,ignore.case = TRUE),
+           grepl(paste0(input$shareChannel,collapse="|"),acquisition_channel),
+           grepl(paste0(input$hanaLocation,collapse="|"),hana_location)) %>% 
+    group_by(first_contract) %>% 
+    summarise(members=n()) %>% 
+    mutate(share=members/sum(members)) %>% 
+    arrange(share) %>% 
+  #  mutate(first_contract=forcats::fct_inorder(first_contract))
+    mutate(first_contract=forcats::fct_inorder(forcats::fct_lump(first_contract,n=10,w=share)))
+
+  return(share_data)
+})
+
+updatedCurrentSharePlans <- reactive({
+  share_data <-share_members_edited %>% 
+    filter(earliest_start>=input$ShareTimeRange[1],
+           earliest_start<=input$ShareTimeRange[2],
+           grepl(input$FreePromoIntro,promo,ignore.case = TRUE),
+           grepl(paste0(input$shareChannel,collapse="|"),acquisition_channel),
+           grepl(paste0(input$hanaLocation,collapse="|"),hana_location),
+           still_active=='Yes') %>% 
+    mutate(last_contract=ifelse(latest_start>RiHana::get_relevant_date()$yesterdays_date,first_contract,last_contract)) %>% 
+    group_by(last_contract) %>% 
+    summarise(members=n()) %>% 
+    mutate(share=members/sum(members)) %>% 
+    arrange(share) %>% 
+  #  mutate(first_contract=forcats::fct_inorder(first_contract))
+    mutate(last_contract=forcats::fct_inorder(forcats::fct_lump(last_contract,n=10,w=share)))
+
+  return(share_data)
+})
+
+updatedShareSources <- reactive({
+  source_data <-share_members_edited %>% 
+    filter(earliest_start>=input$ShareTimeRange[1],
+           earliest_start<=input$ShareTimeRange[2],
+           grepl(input$FreePromoIntro,promo,ignore.case = TRUE),
+           grepl(paste0(input$shareChannel,collapse="|"),acquisition_channel),
+           grepl(paste0(input$hanaLocation,collapse="|"),hana_location)) %>% 
+    group_by(acquisition_source) %>% 
+    summarise(members=n()) %>% 
+    arrange(members) %>% 
+    mutate(acquisition_source=forcats::fct_inorder(acquisition_source))
+  
+
+  return(source_data)
+})
+
+```
+
+Sidebar {.sidebar}
+=====================================
+###### **Data Updated:** _`r as_date(file.info('inc/share_data.RData')$mtime)` ._
+
+```{r}
+
+dateRangeInput('ShareTimeRange',
+      label = 'Choose the time range',
+      min=RiHana::get_relevant_date()$yoy_date,
+      max=RiHana::get_relevant_date()$yesterdays_date,
+      start = RiHana::get_relevant_date()$yoy_date, 
+      end = RiHana::get_relevant_date()$yesterdays_date,
+      weekstart = 1
+    )
+
+
+selectizeInput(
+        'hanaLocation', 'Choose a location', choices = unique(share_members_edited$hana_location),
+        options = list(
+          placeholder = 'Please select an option below',
+          onInitialize = I('function() { this.setValue("*"); }')
+        ),
+        multiple=TRUE
+)
+
+selectizeInput(
+        'shareChannel', 'Choose the acquisition channel', choices = unique(share_members_edited$acquisition_channel),
+        options = list(
+          placeholder = 'Please select an option below',
+          onInitialize = I('function() { this.setValue("*"); }')
+        ),
+        multiple=TRUE
+)
+
+
+radioButtons("FreePromoIntro",label="Filter for free promo",
+             choices=c("No"="*",
+                       "Yes"="Yes"),
+             selected="*")
+
+```
+
+<strong> Cohort Survival</strong> - column 0 represents total number of signups during cohort month.  column 1 represents total number who still have an active plan at the end of the signup month. 2-n are counts of members at the end of referenced month.
+
+<strong>Days in unit (DIU)</strong> - Count of unique days a member has been identified as being at a Hana unit.  Currently using feenics swipe data only.
+
+<strong>Member Utilization</strong> - DIU/Membership Length (in days)
+
+
+
+
+Overview {data-orientation=rows}
+===================================== 
+
+
+Row{ width=8}
+-------------------------------------
+### Share Members (acquired)
+
+```{r}
+my_colors<-hana_color_palette(3)
+
+renderValueBox({
+  shareSummary<-updatedShareDataSummary()
+valueBox(prettyNum(shareSummary$total_members,big.mark = ","), 
+         icon = "fa-user",
+         color = "#E6E2DA")
+})
+```
+
+### Share Members (active)
+
+```{r}
+my_colors<-hana_color_palette(3)
+renderValueBox({
+  shareSummary<-updatedShareDataSummary()
+valueBox(prettyNum(shareSummary$active_members,big.mark = ","), 
+         icon = "fa-smile",
+         color = "#E6E2DA")
+})
+
+```
+
+### Average Rev/Member
+
+```{r}
+my_colors<-hana_color_palette(3)
+renderValueBox({
+  shareSummary<-updatedShareDataSummary()
+valueBox(prettyNum(shareSummary$rev_member,big.mark = ","), 
+         icon = "fa-file-invoice-dollar",
+         color = "#E6E2DA")
+})
+```
+
+
+### Monthly Member churn
+
+```{r}
+my_colors<-hana_color_palette(3)
+renderValueBox({
+  churnSummary<-updatedShareMonthlyChurn()
+valueBox(prettyNum(churnSummary$monthly_churn,big.mark = ","), 
+         icon = "fa-sign-out-alt",
+         color = "#E6E2DA")
+})
+```
+
+
+Row
+-------------------------------------
+
+### Cohort Survival
+
+```{r}
+
+DT::renderDataTable({
+datatable(updatedShareSurvival(), escape = FALSE,rownames = FALSE, extensions = c('Scroller', 'Buttons'), 
+#          options = c(list(scrollY = 800, scroller = TRUE, scrollX=TRUE, deferRender=TRUE, columnDefs = list(list(className = 'dt-left', targets = 0:3))),list(dom='t',ordering=F)))
+          options = c(list(scroller = TRUE,scrollY = 300,scrollX=TRUE, deferRender=TRUE, dom='t',ordering=F)))
+})
+  
+```
+
+
+### Cohort Retention
+
+```{r }
+
+ renderPlotly({
+
+   share_members<-updatedShareData()
+   share_members %>% 
+  arrange(desc(join_month)) %>% 
+  mutate(join_month=factor(as.character(join_month))) %>% 
+  group_by(join_month) %>% 
+  summarise(retention=sum(still_active=='Yes')/n()) %>% 
+  plot_ly(marker = list(color = "#002D36"),
+          orientation='h',
+          y = ~join_month,
+          x = ~retention,
+          type="bar") %>% 
+     layout(yaxis = list(autorange = "reversed"),
+            xaxis= list(tickformat = "%"))
+    })   
+
+
+
+
+```
+
+
+
+Row
+-------------------------------------
+
+### Days in unit
+
+```{r }
+
+renderPlotly({
+
+swipe_data_detail<-updatedSwipeData()
+swipe_data_detail %>% 
+plot_ly(marker = list(color = "#002D36"),
+          orientation='v',
+          y = ~members,
+          x = ~days,
+          type="bar") 
+    })     
+
+# density <- density(swipe_data_detail$days)
+# plot_ly(x = ~density$x, 
+#         y = ~density$y, 
+#         type = 'scatter', 
+#         mode = 'lines', 
+#         fill = 'tozeroy',
+#         fillcolor = '#002D36',
+#         line = list(width = 0.5)) %>%
+#   layout(xaxis = list(title = 'Days on site',
+#                       showgrid=F),
+#          yaxis = list(title = 'Density'))
+#})
+
+```
+
+### Member Utilization
+
+```{r }
+
+renderPlotly({
+
+share_data_detail<-updatedShareData()
+  
+density <- density(share_data_detail$member_utilization)
+plot_ly(x = ~density$x, 
+        y = ~density$y, 
+        type = 'scatter', 
+        mode = 'lines', 
+        fill = 'tozeroy',
+        fillcolor = '#002D36',
+        line = list(width = 0.5)) %>%
+  layout(xaxis = list(title = 'Member Usage',
+                      showgrid=F,
+                      tickformat = "%"),
+         yaxis = list(title = 'Relative Probability')) 
+})
+
+```
+
+
+### Day of Week usage
+
+```{r }
+
+
+ renderPlotly({
+
+  swip_data_detail<-updatedSwipeDataDay()
+  swip_data_detail %>%  
+  plot_ly(marker = list(color = "#002D36"),
+          orientation='v',
+          y = ~occurences,
+          x = ~swipe_day,
+          type="bar") %>% 
+    layout(yaxis= list(tickformat = "%"))
+
+    })   
+
+
+```
+
+Share Customers {data-orientation=rows}
+===================================== 
+
+Row
+-------------------------------------
+
+### First Plan
+
+```{r }
+
+
+ renderPlotly({
+
+  share_plan_detail<-updatedFirstSharePlans()
+  share_plan_detail %>%  
+  plot_ly(marker = list(color = "#002D36"),
+          orientation='h',
+          y = ~first_contract,
+          x = ~share,
+          type="bar") %>% 
+    layout(xaxis= list(tickformat = "%"))
+
+    })   
+
+
+```
+
+### Current Active Plans
+
+```{r }
+
+
+ renderPlotly({
+
+  share_plan_detail<-updatedCurrentSharePlans()
+  share_plan_detail %>%  
+  plot_ly(marker = list(color = "#002D36"),
+          orientation='h',
+          y = ~last_contract,
+          x = ~share,
+          type="bar") %>% 
+    layout(xaxis= list(tickformat = "%"))
+
+    })   
+
+
+```
+
+
+Row
+-------------------------------------
+
+### Acquisition Source
+
+
+```{r }
+
+
+ renderPlotly({
+
+  share_source_detail<-updatedShareSources()
+  share_source_detail %>%  
+  plot_ly(marker = list(color = "#002D36"),
+          orientation='h',
+          y = ~acquisition_source,
+          x = ~members,
+          type="bar") 
+
+    })   
+
+
+```
+
+### Site access by membership length
+
+
+```{r }
+
+
+ renderPlotly({
+
+  share_source_detail<-updatedShareData()
+  share_source_detail %>%  
+  plot_ly(marker = list(color = "#002D36"),
+          y = ~membership_length,
+          x = ~swipe_days) 
+
+    })   
+
+
+```
+
+
+Share Details {data-orientation=rows}
+===================================== 
+
+```{r }
+
+
+DT::renderDataTable({
+datatable(updatedShareData(), escape = FALSE,rownames = FALSE, extensions = c('Scroller', 'Buttons'), 
+          options = c(list(scrollY = 800, scroller = TRUE, scrollX=TRUE, deferRender=TRUE, dom = 'fBrtip',buttons = c('csv'))))
+})
+
+```
+
